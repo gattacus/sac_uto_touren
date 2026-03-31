@@ -312,8 +312,8 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
     tour["equipment"] = kv.get("Ausrüstung", "")
 
     dd2 = sacdateparser.parse_date3(kv.get("Anmeldung", ""))
-    tour["subscription_period_start"] = dd2["from"]
-    tour["subscription_period_end"] = dd2["to"]
+    tour["subscription_period_start"] = dd2.get("from")
+    tour["subscription_period_end"] = dd2.get("to")
 
     update_row(db, tour)
     return True
