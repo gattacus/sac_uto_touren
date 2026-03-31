@@ -1,0 +1,16 @@
+services:
+  sac-uto-scraper:
+    build:
+      context: .
+    image: sac-uto-scraper:latest
+    container_name: sac-uto-scraper
+    hostname: sac-uto-scraper
+    restart: unless-stopped
+    command: ["python", "-m", "http.server", "8000", "--bind", "0.0.0.0", "--directory", "/data"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SCRAPER_DB_PATH: /data/data.sqlite
+    ports:
+      - "${SQLITE_DOWNLOAD_BIND:-0.0.0.0:8084}:8000"
+    volumes:
+      - ./data:/data

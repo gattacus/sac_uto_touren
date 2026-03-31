@@ -58,6 +58,12 @@ python scraper.py
 The scraper automatically paginates through all available tours and writes the
 results to `data.sqlite` in the current directory.
 
+To write to a different SQLite path, set `SCRAPER_DB_PATH`:
+
+```bash
+SCRAPER_DB_PATH=/tmp/sac_uto_touren/data.sqlite python scraper.py
+```
+
 ### Process a single tour URL directly
 
 Useful for testing or debugging a specific tour:
@@ -79,6 +85,85 @@ pytest test_sacdateparser.py -v
 # or with the Python standard library only
 python -m unittest test_sacdateparser -v
 ```
+
+---
+
+## Docker / Ofelia deployment
+
+The repository now includes a `Dockerfile` and a [`compose.yaml`](./compose.yaml)
+for a homeserver setup where an existing
+[Ofelia](https://github.com/mcuadros/ofelia) container triggers the scraper on a
+schedule.
+
+### What the compose stack does
+
+- `sac-uto-scraper`: builds this repo into a small Python image and keeps one lightweight
+  container running so Ofelia can `exec` the scraper on schedule while the same
+  container serves the generated SQLite file over HTTP.
+
+The SQLite file is stored on the host in `./data/data.sqlite`.
+
+### Start the stack
+
+```bash
+docker compose up -d --build
+```
+
+Your existing Ofelia container must be able to see this `sac-uto-scraper`
+container on the same Docker daemon and must not filter it out. The compose
+service sets a fixed Docker container name and hostname of `sac-uto-scraper`
+and exposes the required `ofelia.job-exec.*` labels directly.
+
+### Schedule configuration
+
+By default, the container labels expose this cron schedule:
+
+```text
+0 4 * * *
+```
+
+You can override it via an environment variable before starting the stack:
+
+```bash
+OFELIA_SCHEDULE="0 */6 * * *" docker compose up -d
+```
+
+Ofelia runs the command inside the `sac-uto-scraper` container:
+
+```bash
+python scraper.py
+```
+
+The job is configured with `no-overlap=true`, so a second run will not start
+while a previous one is still active.
+
+### Manual run
+
+```bash
+docker compose exec sac-uto-scraper python scraper.py
+```
+
+### Download the resulting SQLite file
+
+The `sac-uto-scraper` container also runs a simple file server for the `/data`
+directory, so the SQLite file is available over HTTP from the same container.
+
+By default it binds to `0.0.0.0:8084`, so any device on your local network can
+fetch it from the homeserver IP:
+
+```bash
+curl -fO http://YOUR-HOMESERVER-IP:8084/data.sqlite
+```
+
+If you want to limit it back to localhost only, override the bind address when
+starting the stack:
+
+```bash
+SQLITE_DOWNLOAD_BIND="127.0.0.1:8084" docker compose up -d
+```
+
+You can also skip HTTP entirely and copy the file straight from the host because
+it is persisted in `./data/data.sqlite`.
 
 ---
 

@@ -7,6 +7,7 @@ Abhängigkeiten:
     pip install requests beautifulsoup4
 """
 
+import os
 import sys
 import sqlite3
 import time
@@ -31,13 +32,19 @@ HEADERS = {
     )
 }
 
+DB_PATH = os.environ.get("SCRAPER_DB_PATH", "data.sqlite")
+
 # ---------------------------------------------------------------------------
 # Datenbank
 # ---------------------------------------------------------------------------
 
-def init_database() -> sqlite3.Connection:
+def init_database(db_path: str = DB_PATH) -> sqlite3.Connection:
     """Richtet die SQLite-Datenbank ein und gibt die Verbindung zurück."""
-    db = sqlite3.connect("data.sqlite", check_same_thread=False)
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    print(f"Nutze SQLite-Datei: {db_path}")
+    db = sqlite3.connect(db_path, check_same_thread=False)
     cur = db.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS data (
