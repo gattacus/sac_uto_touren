@@ -15,6 +15,7 @@ import os
 import sys
 import sqlite3
 import time
+import threading
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -39,6 +40,7 @@ HEADERS = {
 DB_PATH = os.environ.get("SCRAPER_DB_PATH", "data.sqlite")
 DEFAULT_LOG_LEVEL = os.environ.get("SCRAPER_LOG_LEVEL", "INFO")
 LOGGER = logging.getLogger("sac_uto_touren")
+DB_WRITE_LOCK = threading.Lock()
 
 
 def configure_logging(level_name: str) -> str:
@@ -139,29 +141,32 @@ def update_row(db: sqlite3.Connection | None, tour: dict) -> None:
         print("REC:", tour)
         return
 
-    db.execute("""
-        INSERT OR REPLACE INTO data (
-            id, active, lastSeen,
-            date_from, date_to,
-            status, type, level, grp,
-            title, leiter, url,
-            altitude, mtype, type_ext, level2,
-            arrival, text, extra_info,
-            equipment,
-            subscription_period_start,
-            subscription_period_end
-        ) VALUES (
-            :id, :active, :lastSeen,
-            :date_from, :date_to,
-            :status, :type, :level, :group,
-            :title, :leiter, :url,
-            :altitude, :mtype, :type_ext, :level2,
-            :arrival, :text, :extra_info,
-            :equipment,
-            :subscription_period_start,
-            :subscription_period_end
-        )
-    """, tour)
+    # A single SQLite connection is shared across worker threads, so writes
+    # must be serialized to avoid concurrent API misuse.
+    with DB_WRITE_LOCK:
+        db.execute("""
+            INSERT OR REPLACE INTO data (
+                id, active, lastSeen,
+                date_from, date_to,
+                status, type, level, grp,
+                title, leiter, url,
+                altitude, mtype, type_ext, level2,
+                arrival, text, extra_info,
+                equipment,
+                subscription_period_start,
+                subscription_period_end
+            ) VALUES (
+                :id, :active, :lastSeen,
+                :date_from, :date_to,
+                :status, :type, :level, :group,
+                :title, :leiter, :url,
+                :altitude, :mtype, :type_ext, :level2,
+                :arrival, :text, :extra_info,
+                :equipment,
+                :subscription_period_start,
+                :subscription_period_end
+            )
+        """, tour)
 
 
 # ---------------------------------------------------------------------------
