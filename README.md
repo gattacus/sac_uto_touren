@@ -187,6 +187,7 @@ Results are written to `data.sqlite`, table `data`:
 | `active`                                                | `1` if the tour was still present on the website during the last run |
 | `lastSeen`                                              | Unix timestamp (ms) of the last successful fetch                     |
 | `date_from` / `date_to`                                 | Tour date (ISO 8601)                                                 |
+| `duration`                                              | Raw duration text from the overview list (e.g. `1 Tag`, `2 Tage`)   |
 | `status`                                                | `open`, `full`, `cancelled`, or `ok`                                 |
 | `type`                                                  | Tour type (e.g. `Ss`, `Hw`)                                          |
 | `level`                                                 | Difficulty rating (e.g. `WT4`)                                       |

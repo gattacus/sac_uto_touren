@@ -105,6 +105,7 @@ def init_database(db_path: str = DB_PATH) -> sqlite3.Connection:
             lastSeen                  INTEGER,
             date_from                 TEXT,
             date_to                   TEXT,
+            duration                  TEXT,
             status                    TEXT,
             type                      TEXT,
             level                     TEXT,
@@ -129,6 +130,10 @@ def init_database(db_path: str = DB_PATH) -> sqlite3.Connection:
         cur.execute("ALTER TABLE data ADD COLUMN extra_info TEXT")
     except sqlite3.OperationalError:
         pass  # Spalte existiert bereits
+    try:
+        cur.execute("ALTER TABLE data ADD COLUMN duration TEXT")
+    except sqlite3.OperationalError:
+        pass  # Spalte existiert bereits
 
     db.execute("UPDATE data SET active=0")
     db.commit()
@@ -147,7 +152,7 @@ def update_row(db: sqlite3.Connection | None, tour: dict) -> None:
         db.execute("""
             INSERT OR REPLACE INTO data (
                 id, active, lastSeen,
-                date_from, date_to,
+                date_from, date_to, duration,
                 status, type, level, grp,
                 title, leiter, url,
                 altitude, mtype, type_ext, level2,
@@ -157,7 +162,7 @@ def update_row(db: sqlite3.Connection | None, tour: dict) -> None:
                 subscription_period_end
             ) VALUES (
                 :id, :active, :lastSeen,
-                :date_from, :date_to,
+                :date_from, :date_to, :duration,
                 :status, :type, :level, :group,
                 :title, :leiter, :url,
                 :altitude, :mtype, :type_ext, :level2,
@@ -212,8 +217,8 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
         if retry > 0:
             LOGGER.info("Wiederholung ...")
             return update_detail(db, tour, retry - 1)
-        LOGGER.error("Abbruch.")
-        sys.exit(1)
+        LOGGER.error("Tour wird übersprungen, Hauptlauf läuft weiter.")
+        return False
 
     soup = BeautifulSoup(body, "html.parser")
 
@@ -247,8 +252,8 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
         if retry > 0:
             LOGGER.info("Wiederholung ...")
             return update_detail(db, tour, retry - 1)
-        LOGGER.error("Abbruch.")
-        sys.exit(1)
+        LOGGER.error("Tour wird übersprungen, Hauptlauf läuft weiter.")
+        return False
 
     num_tours_done += 1
     LOGGER.info(
@@ -305,7 +310,7 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
     tour["mtype"] = kv.get("Anlasstyp", "")
     tour["type_ext"] = kv.get("Typ/Zusatz:", "")
     tour["level2"] = kv.get("Anforderungen", "")
-    tour["altitude"] = kv.get("Auf-, Abstieg/Marschzeit", "")
+    tour["altitude"] = kv.get("Auf-, Abstieg / Zeit", "")
     tour["arrival"] = kv.get("Reiseroute", "")
     tour["text"] = kv.get("Route / Details", "")
     tour["extra_info"] = kv.get("Zusatzinfo", "")
@@ -388,7 +393,7 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
         tour["type"] = tds[1].get_text().strip()
         # tds[2] = Icon (übersprungen)
         tour["level"] = tds[3].get_text().strip()
-        tour["rawDuration"] = tds[4].get_text().strip()
+        tour["duration"] = tds[4].get_text().strip()
         tour["group"] = tds[5].get_text().strip()
         # tds[6] = ? (übersprungen)
         title_td = tds[7]
@@ -421,7 +426,10 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
         }
         for future in as_completed(futures):
             try:
-                future.result()
+                success = future.result()
+                if not success:
+                    t = futures[future]
+                    LOGGER.warning("Tour %s wurde nicht gespeichert.", t.get("id"))
             except Exception:
                 t = futures[future]
                 LOGGER.exception("Fehler bei Tour %s", t.get("id"))
@@ -447,7 +455,9 @@ if __name__ == "__main__":
 
     if args.tour_url:
         # Einzelne Tour-URL direkt verarbeiten (wie im Original)
-        update_detail(None, {"url": args.tour_url})
+        ok = update_detail(None, {"url": args.tour_url})
+        if not ok:
+            sys.exit(1)
     else:
         database = init_database()
         run(database)
