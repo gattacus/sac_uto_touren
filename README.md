@@ -28,6 +28,7 @@ I migrated it now to python. Thanks to Claude AI.
 | `scraper.py`            | Main script – fetches tour list and detail pages, writes to SQLite |
 | `sacdateparser.py`      | Helper functions for parsing German-language date strings          |
 | `test_sacdateparser.py` | Unit tests for the date parser                                     |
+| `test_scraper.py`       | Unit tests for scraper parsing, schema migration, and persistence  |
 
 ---
 
@@ -37,12 +38,6 @@ Python 3.10+ and the following packages:
 
 ```bash
 pip install -r requirements.txt
-```
-
-For tests (optional):
-
-```bash
-pip install pytest
 ```
 
 ---
@@ -77,7 +72,7 @@ SCRAPER_LOG_LEVEL=WARNING python scraper.py
 Useful for testing or debugging a specific tour:
 
 ```bash
-python scraper.py "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/.html?page=detail&touren_nummer=5947"
+python scraper.py "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/?page=detail&touren_nummer=5947"
 ```
 
 In single-tour mode no database writes are performed – data is printed to stdout.
@@ -89,11 +84,12 @@ record output.
 ## Tests
 
 ```bash
-# with pytest
-pytest test_sacdateparser.py -v
+# run the full test suite
+python -m unittest -v
 
-# or with the Python standard library only
+# or run individual modules
 python -m unittest test_sacdateparser -v
+python -m unittest test_scraper -v
 ```
 
 ---
@@ -193,7 +189,7 @@ Results are written to `data.sqlite`, table `data`:
 | `level`                                                 | Difficulty rating (e.g. `WT4`)                                       |
 | `grp`                                                   | Group (e.g. `Senioren`)                                              |
 | `title`                                                 | Tour name                                                            |
-| `leiter`                                                | Tour leader                                                          |
+| `leiter`                                                | Tour leader name(s); multiple leaders are concatenated with ` | `   |
 | `url`                                                   | Link to the detail page                                              |
 | `altitude`                                              | Ascent/descent and hiking time                                       |
 | `mtype`                                                 | Event type (e.g. `Tour`, `Kurs`)                                     |
@@ -209,10 +205,11 @@ Results are written to `data.sqlite`, table `data`:
 
 ## Notes
 
-- The scraper automatically retries on HTTP errors (5xx) with exponential backoff.
+- The scraper automatically retries `requests`-level fetch failures with exponential backoff.
 - Tours with a clearly malformed date (`Do 0. …`) are skipped or retried – this is a
   known server-side race condition on the source website.
 - At most 2 detail pages are fetched concurrently to avoid hammering the server.
+- With `--log-level DEBUG`, the scraper also logs total runtime at the end of the run.
 - Currently, the default process is to download all pages, even unchanged. The plan is to implement
   a pre-condition based on the overview list to avoid unnecessary reload of everything. For this, the
   python migration was the preparation step.
