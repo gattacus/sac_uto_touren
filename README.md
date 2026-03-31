@@ -64,6 +64,14 @@ To write to a different SQLite path, set `SCRAPER_DB_PATH`:
 SCRAPER_DB_PATH=/tmp/sac_uto_touren/data.sqlite python scraper.py
 ```
 
+To adjust verbosity, either pass `--log-level` or set `SCRAPER_LOG_LEVEL`.
+Supported levels are `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`.
+
+```bash
+python scraper.py --log-level DEBUG
+SCRAPER_LOG_LEVEL=WARNING python scraper.py
+```
+
 ### Process a single tour URL directly
 
 Useful for testing or debugging a specific tour:
@@ -73,6 +81,8 @@ python scraper.py "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/.html?pag
 ```
 
 In single-tour mode no database writes are performed – data is printed to stdout.
+Operational logs continue to go to stderr, so stdout stays usable for the parsed
+record output.
 
 ---
 

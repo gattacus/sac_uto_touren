@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 scraper.py – Python-Äquivalent von scraper.js
 Scraper für SAC UTO Touren (https://sac-uto.ch)
@@ -7,6 +9,8 @@ Abhängigkeiten:
     pip install requests beautifulsoup4
 """
 
+import argparse
+import logging
 import os
 import sys
 import sqlite3
@@ -33,6 +37,52 @@ HEADERS = {
 }
 
 DB_PATH = os.environ.get("SCRAPER_DB_PATH", "data.sqlite")
+DEFAULT_LOG_LEVEL = os.environ.get("SCRAPER_LOG_LEVEL", "INFO")
+LOGGER = logging.getLogger("sac_uto_touren")
+
+
+def configure_logging(level_name: str) -> str:
+    """Konfiguriert das zentrale Logging und gibt das normalisierte Level zurück."""
+    normalized_level = level_name.upper()
+    numeric_level = getattr(logging, normalized_level, None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(
+            f"Ungültiges Log-Level '{level_name}'. Erlaubt sind: "
+            "DEBUG, INFO, WARNING, ERROR, CRITICAL."
+        )
+
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    return normalized_level
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parst CLI-Argumente für normalen Lauf oder Single-Tour-Debugging."""
+    parser = argparse.ArgumentParser(
+        description="Scraped SAC UTO Touren und speichert sie in SQLite."
+    )
+    parser.add_argument(
+        "tour_url",
+        nargs="?",
+        help="Optional: einzelne Tour-URL direkt verarbeiten.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=DEFAULT_LOG_LEVEL,
+        metavar="LEVEL",
+        help=(
+            "Log-Level für stderr (DEBUG, INFO, WARNING, ERROR, CRITICAL). "
+            f"Default: {DEFAULT_LOG_LEVEL}."
+        ),
+    )
+    args = parser.parse_args(argv)
+    try:
+        args.log_level = configure_logging(args.log_level)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 # ---------------------------------------------------------------------------
 # Datenbank
@@ -43,7 +93,7 @@ def init_database(db_path: str = DB_PATH) -> sqlite3.Connection:
     parent = os.path.dirname(db_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    print(f"Nutze SQLite-Datei: {db_path}")
+    LOGGER.info("Nutze SQLite-Datei: %s", db_path)
     db = sqlite3.connect(db_path, check_same_thread=False)
     cur = db.cursor()
     cur.execute("""
@@ -122,12 +172,20 @@ def fetch_page(url: str, retries: int = 3) -> str | None:
     """Lädt eine Seite und gibt den HTML-Body zurück."""
     for attempt in range(retries):
         try:
+            LOGGER.debug("Lade URL: %s", url)
             resp = requests.get(url, headers=HEADERS, timeout=30)
             resp.raise_for_status()
             return resp.text
         except requests.RequestException as e:
-            print(f"Fehler beim Laden von {url} (Versuch {attempt + 1}): {e}")
+            LOGGER.warning(
+                "Fehler beim Laden von %s (Versuch %s/%s): %s",
+                url,
+                attempt + 1,
+                retries,
+                e,
+            )
             time.sleep(2 ** attempt)
+    LOGGER.error("Laden von %s nach %s Versuchen fehlgeschlagen.", url, retries)
     return None
 
 
@@ -145,11 +203,11 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
 
     body = fetch_page(tour["url"])
     if body is None:
-        print(f"Konnte Seite nicht laden: {tour['url']}")
+        LOGGER.error("Konnte Seite nicht laden: %s", tour["url"])
         if retry > 0:
-            print("Wiederholung …")
+            LOGGER.info("Wiederholung ...")
             return update_detail(db, tour, retry - 1)
-        print("Abbruch.")
+        LOGGER.error("Abbruch.")
         sys.exit(1)
 
     soup = BeautifulSoup(body, "html.parser")
@@ -162,25 +220,38 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
     if page_title == "Oops, an error occurred!":
         callout = soup.select_one(".callout-body")
         msg = callout.get_text().strip() if callout else ""
-        print(f"Fehler bei Tour {tour.get('id')}: <{page_title}> <{msg}>")
+        LOGGER.warning(
+            "Fehler bei Tour %s: <%s> <%s>",
+            tour.get("id"),
+            page_title,
+            msg,
+        )
         load_error = True
 
     if page_title in ("500 Internal Server Error", "502 Bad Gateway", "504 Gateway Time-out"):
         body_text = soup.get_text().strip()[:200]
-        print(f"Fehler bei Tour {tour.get('id')}: <{page_title}> <{body_text}>")
+        LOGGER.warning(
+            "Fehler bei Tour %s: <%s> <%s>",
+            tour.get("id"),
+            page_title,
+            body_text,
+        )
         load_error = True
 
     if load_error:
         if retry > 0:
-            print("Wiederholung …")
+            LOGGER.info("Wiederholung ...")
             return update_detail(db, tour, retry - 1)
-        print("Abbruch.")
+        LOGGER.error("Abbruch.")
         sys.exit(1)
 
     num_tours_done += 1
-    print(
-        f"Verarbeite Tour {tour.get('id')}, "
-        f"{num_tours_done} von {num_tours_total}\t\t{tour['url']}"
+    LOGGER.info(
+        "Verarbeite Tour %s, %s von %s %s",
+        tour.get("id"),
+        num_tours_done,
+        num_tours_total,
+        tour["url"],
     )
 
     # Titel und Leiter
@@ -202,16 +273,23 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
         kv[key] = value
 
     if "Datum" not in kv:
-        print("Seiten-Dump vor Fehler:", body[:500])
+        LOGGER.debug("Seiten-Dump vor Fehler: %s", body[:500])
 
     datum = kv.get("Datum", "")
 
     # Sonderfall: Server-Fehler mit Datum "Do 0."
     if datum.startswith("Do 0."):
         if retry > 0:
-            print(f"Wiederholung wegen merkwürdigem Startdatum '{datum}'")
+            LOGGER.warning(
+                "Wiederholung wegen merkwürdigem Startdatum '%s'",
+                datum,
+            )
             return update_detail(db, tour, retry - 1)
-        print(f"Tour mit merkwürdigem Startdatum übersprungen '{datum}': {tour['url']}")
+        LOGGER.error(
+            "Tour mit merkwürdigem Startdatum übersprungen '%s': %s",
+            datum,
+            tour["url"],
+        )
         return False
 
     dd = sacdateparser.parse_date2(datum)
@@ -254,16 +332,16 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
 
     body = fetch_page(list_url)
     if body is None:
-        print(f"Konnte Hauptseite nicht laden: {list_url}")
+        LOGGER.error("Konnte Hauptseite nicht laden: %s", list_url)
         sys.exit(1)
 
-    print(f"Verarbeite Hauptliste {list_url}")
+    LOGGER.info("Verarbeite Hauptliste %s", list_url)
     soup = BeautifulSoup(body, "html.parser")
 
     rows = soup.select("table.table tr")
 
     if offset == 0 and not rows:
-        print("Keine Daten auf der Indexseite gefunden.")
+        LOGGER.error("Keine Daten auf der Indexseite gefunden.")
         sys.exit(1)
 
     detail_tours: list[dict] = []
@@ -339,9 +417,9 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
         for future in as_completed(futures):
             try:
                 future.result()
-            except Exception as exc:
+            except Exception:
                 t = futures[future]
-                print(f"Fehler bei Tour {t.get('id')}: {exc}")
+                LOGGER.exception("Fehler bei Tour %s", t.get("id"))
 
     # Commit nach jeder Seite
     db.commit()
@@ -350,7 +428,7 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
     if len(detail_tours) > 40:
         run(db, offset + 50)
     else:
-        print("Commit und Datenbankverbindung schliessen.")
+        LOGGER.info("Commit und Datenbankverbindung schliessen.")
         db.close()
 
 
@@ -359,11 +437,12 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
+    args = parse_args(sys.argv[1:])
+    LOGGER.debug("Logging konfiguriert mit Level %s", args.log_level)
 
-    if args:
+    if args.tour_url:
         # Einzelne Tour-URL direkt verarbeiten (wie im Original)
-        update_detail(None, {"url": args[0]})
+        update_detail(None, {"url": args.tour_url})
     else:
         database = init_database()
         run(database)
