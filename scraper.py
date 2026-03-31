@@ -41,6 +41,7 @@ DB_PATH = os.environ.get("SCRAPER_DB_PATH", "data.sqlite")
 DEFAULT_LOG_LEVEL = os.environ.get("SCRAPER_LOG_LEVEL", "INFO")
 LOGGER = logging.getLogger("sac_uto_touren")
 DB_WRITE_LOCK = threading.Lock()
+LEITER_SEPARATOR = " | "
 
 
 def configure_logging(level_name: str) -> str:
@@ -85,6 +86,57 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     except ValueError as exc:
         parser.error(str(exc))
     return args
+
+
+def _join_leiter_names(names: list[str]) -> str:
+    """Normalisiert und verknüpft mehrere Leiter-Namen deterministisch."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for name in names:
+        clean = " ".join(name.split())
+        if not clean or clean in seen:
+            continue
+        normalized.append(clean)
+        seen.add(clean)
+
+    return LEITER_SEPARATOR.join(normalized)
+
+
+def _extract_leiter_from_detail(soup: BeautifulSoup, kv: dict[str, str]) -> str:
+    """Liest alle verfügbaren Leiter-Namen aus der Detailseite."""
+    names = [
+        element.get_text(" ", strip=True)
+        for element in soup.select(".droptours-address-name")
+    ]
+    if names:
+        return _join_leiter_names(names)
+
+    fallback_names = [
+        value
+        for key, value in kv.items()
+        if key.startswith("Tourenleiter")
+    ]
+    return _join_leiter_names(fallback_names)
+
+
+def _extract_leiter_from_list_row(row: BeautifulSoup) -> str:
+    """Liest Leiter-Namen robust aus einer Listenzeile."""
+    leader_cell = row.select_one("td.droptours-leitung")
+    if leader_cell is None:
+        tds = row.find_all("td", recursive=False)
+        leader_cell = tds[-1] if tds else None
+    if leader_cell is None:
+        return ""
+
+    anchor_names = [
+        anchor.get_text(" ", strip=True)
+        for anchor in leader_cell.find_all("a")
+    ]
+    if anchor_names:
+        return _join_leiter_names(anchor_names)
+
+    return _join_leiter_names([leader_cell.get_text(" ", strip=True)])
 
 # ---------------------------------------------------------------------------
 # Datenbank
@@ -264,11 +316,9 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
         tour["url"],
     )
 
-    # Titel und Leiter
+    # Titel
     h2 = soup.find("h2")
     tour["title"] = h2.get_text().strip() if h2 else tour.get("title", "")
-    leiter_el = soup.select_one(".droptours-address-name")
-    tour["leiter"] = leiter_el.get_text().strip() if leiter_el else ""
 
     # Key-Value-Tabelle
     kv: dict[str, str] = {}
@@ -305,6 +355,7 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
     dd = sacdateparser.parse_date2(datum)
     tour["date_from"] = dd["from"]
     tour["date_to"] = dd["to"]
+    tour["leiter"] = _extract_leiter_from_detail(soup, kv) or tour.get("leiter", "")
 
     tour["group"] = kv.get("Gruppe", tour.get("group", ""))
     tour["mtype"] = kv.get("Anlasstyp", "")
@@ -410,10 +461,7 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
         qs = parse_qs(parsed.query)
         tour["id"] = qs.get("touren_nummer", [None])[0]
 
-        if len(tds) > 8:
-            tour["leiter"] = tds[8].get_text().strip()
-        else:
-            tour["leiter"] = ""
+        tour["leiter"] = _extract_leiter_from_list_row(row)
 
         num_tours_total += 1
         detail_tours.append(tour)
@@ -452,12 +500,16 @@ def run(db: sqlite3.Connection, offset: int = 0) -> None:
 if __name__ == "__main__":
     args = parse_args(sys.argv[1:])
     LOGGER.debug("Logging konfiguriert mit Level %s", args.log_level)
+    start_time = time.monotonic()
 
-    if args.tour_url:
-        # Einzelne Tour-URL direkt verarbeiten (wie im Original)
-        ok = update_detail(None, {"url": args.tour_url})
-        if not ok:
-            sys.exit(1)
-    else:
-        database = init_database()
-        run(database)
+    try:
+        if args.tour_url:
+            # Einzelne Tour-URL direkt verarbeiten (wie im Original)
+            ok = update_detail(None, {"url": args.tour_url})
+            if not ok:
+                sys.exit(1)
+        else:
+            database = init_database()
+            run(database)
+    finally:
+        LOGGER.debug("Gesamtlaufzeit: %.3f Sekunden", time.monotonic() - start_time)
