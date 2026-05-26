@@ -4,3 +4,4 @@ __pycache__
 *.sqlite-journal
 data/
 .env
+.DS_Store
