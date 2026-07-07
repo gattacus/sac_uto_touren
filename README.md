@@ -79,6 +79,25 @@ In single-tour mode no database writes are performed – data is printed to stdo
 Operational logs continue to go to stderr, so stdout stays usable for the parsed
 record output.
 
+### Historical backfill
+
+To fetch all year-specific archive pages offered by the SAC website, run:
+
+```bash
+python scraper.py --historical
+```
+
+In the Docker setup, run the same mode inside the scraper container:
+
+```bash
+docker compose exec sac-uto-scraper python scraper.py --historical
+```
+
+Historical mode first scrapes each year from the website's year dropdown, then
+scrapes the normal current listing last. Rows found only in historical year
+pages are retained with `active=0`; only tours still present in the current
+listing are stored with `active=1`.
+
 ---
 
 ## Tests

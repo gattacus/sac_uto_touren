@@ -42,6 +42,7 @@ DEFAULT_LOG_LEVEL = os.environ.get("SCRAPER_LOG_LEVEL", "INFO")
 LOGGER = logging.getLogger("sac_uto_touren")
 DB_WRITE_LOCK = threading.Lock()
 LEITER_SEPARATOR = " | "
+LIST_BASE_URL = "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/"
 
 
 def configure_logging(level_name: str) -> str:
@@ -78,6 +79,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Log-Level für stderr (DEBUG, INFO, WARNING, ERROR, CRITICAL). "
             f"Default: {DEFAULT_LOG_LEVEL}."
+        ),
+    )
+    parser.add_argument(
+        "--historical",
+        action="store_true",
+        help=(
+            "Scrape all year-specific archive pages before scraping the "
+            "current listing. Historical-only rows remain inactive."
         ),
     )
     args = parser.parse_args(argv)
@@ -251,6 +260,53 @@ def fetch_page(url: str, retries: int = 3) -> str | None:
     return None
 
 
+def build_list_url(year: int | str | None = None, offset: int = 0) -> str:
+    """Baut die URL für die paginierte Tourenliste."""
+    year_value = "" if year is None else str(year)
+    return (
+        f"{LIST_BASE_URL}"
+        f"?page=touren&year={year_value}&typ=&gruppe=&anlasstyp=&suchstring=&offset={offset}"
+    )
+
+
+def extract_years_from_html(body: str) -> list[int]:
+    """Liest die angebotenen Jahresfilter aus der aktuellen Listenansicht."""
+    soup = BeautifulSoup(body, "html.parser")
+    year_select = soup.find("select", attrs={"name": "year"})
+    if year_select is None:
+        return []
+
+    years: list[int] = []
+    seen: set[int] = set()
+    for option in year_select.find_all("option"):
+        value = option.get("value", "").strip()
+        if not value.isdigit():
+            continue
+        year = int(value)
+        if year in seen:
+            continue
+        years.append(year)
+        seen.add(year)
+    return years
+
+
+def discover_years() -> list[int]:
+    """Lädt die aktuelle Liste und gibt die vom SAC angebotenen Jahre zurück."""
+    list_url = build_list_url()
+    body = fetch_page(list_url)
+    if body is None:
+        LOGGER.error("Konnte Hauptseite nicht laden: %s", list_url)
+        sys.exit(1)
+
+    years = extract_years_from_html(body)
+    if not years:
+        LOGGER.error("Keine Jahresauswahl auf der Hauptseite gefunden.")
+        sys.exit(1)
+
+    LOGGER.info("Gefundene Jahre für historischen Lauf: %s", years)
+    return years
+
+
 # ---------------------------------------------------------------------------
 # Detailseite
 # ---------------------------------------------------------------------------
@@ -379,126 +435,140 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
 # Hauptseite (Listenansicht) – paginiert
 # ---------------------------------------------------------------------------
 
-def run(db: sqlite3.Connection, offset: int = 0) -> None:
+def run(
+    db: sqlite3.Connection,
+    year: int | str | None = None,
+    offset: int = 0,
+    active: int = 1,
+    allow_empty: bool = False,
+) -> None:
     """
     Verarbeitet die paginierte Tourenliste und ruft für jeden Eintrag
     die Detailseite ab.
     """
     global num_tours_total
 
-    list_url = (
-        "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/"
-        f"?page=touren&year=&typ=&gruppe=&anlasstyp=&suchstring=&offset={offset}"
-    )
+    current_offset = offset
+    while True:
+        list_url = build_list_url(year=year, offset=current_offset)
 
-    body = fetch_page(list_url)
-    if body is None:
-        LOGGER.error("Konnte Hauptseite nicht laden: %s", list_url)
-        sys.exit(1)
+        body = fetch_page(list_url)
+        if body is None:
+            LOGGER.error("Konnte Hauptseite nicht laden: %s", list_url)
+            sys.exit(1)
 
-    LOGGER.info("Verarbeite Hauptliste %s", list_url)
-    soup = BeautifulSoup(body, "html.parser")
+        LOGGER.info("Verarbeite Hauptliste %s", list_url)
+        soup = BeautifulSoup(body, "html.parser")
 
-    rows = soup.select("table.table tr")
+        rows = soup.select("table.table tr")
 
-    if offset == 0 and not rows:
-        LOGGER.error("Keine Daten auf der Indexseite gefunden.")
-        sys.exit(1)
+        if current_offset == 0 and not rows:
+            if allow_empty:
+                LOGGER.warning("Keine Daten auf der Indexseite gefunden, überspringe: %s", list_url)
+                break
+            LOGGER.error("Keine Daten auf der Indexseite gefunden.")
+            sys.exit(1)
 
-    detail_tours: list[dict] = []
+        detail_tours: list[dict] = []
 
-    for row in rows:
-        cells = row.find_all(True, recursive=False)
-        if not cells:
-            continue
-        first = cells[0]
+        for row in rows:
+            cells = row.find_all(True, recursive=False)
+            if not cells:
+                continue
+            first = cells[0]
 
-        # Überspringe Kopfzeilen (th) oder colspan-Zellen
-        if first.name != "td":
-            continue
-        if first.get("colspan"):
-            continue
+            # Überspringe Kopfzeilen (th) oder colspan-Zellen
+            if first.name != "td":
+                continue
+            if first.get("colspan"):
+                continue
 
-        tour: dict = {}
-        tour["active"] = 1
-        tour["lastSeen"] = int(time.time() * 1000)
+            tour: dict = {}
+            tour["active"] = active
+            tour["lastSeen"] = int(time.time() * 1000)
 
-        # Spalte 0: Datum / Status
-        tour["rawDate"] = first.get_text().strip()
-        classes = first.get("class", [])
-        if "status_3" in classes:
-            tour["status"] = "full"
-        elif "status_2" in classes:
-            tour["status"] = "cancelled"
-        elif "without_register" in classes:
-            tour["status"] = "ok"
-        elif "status_1" in classes or "status_0" in classes:
-            tour["status"] = "open"
-        else:
-            tour["status"] = ""
+            # Spalte 0: Datum / Status
+            tour["rawDate"] = first.get_text().strip()
+            classes = first.get("class", [])
+            if "status_3" in classes:
+                tour["status"] = "full"
+            elif "status_2" in classes:
+                tour["status"] = "cancelled"
+            elif "without_register" in classes:
+                tour["status"] = "ok"
+            elif "status_1" in classes or "status_0" in classes:
+                tour["status"] = "open"
+            else:
+                tour["status"] = ""
 
-        tds = row.find_all("td")
-        if len(tds) < 8:
-            continue
+            tds = row.find_all("td")
+            if len(tds) < 8:
+                continue
 
-        tour["type"] = tds[1].get_text().strip()
-        # tds[2] = Icon (übersprungen)
-        tour["level"] = tds[3].get_text().strip()
-        tour["duration"] = tds[4].get_text().strip()
-        tour["group"] = tds[5].get_text().strip()
-        # tds[6] = ? (übersprungen)
-        title_td = tds[7]
-        tour["title"] = title_td.get_text().strip()
+            tour["type"] = tds[1].get_text().strip()
+            # tds[2] = Icon (übersprungen)
+            tour["level"] = tds[3].get_text().strip()
+            tour["duration"] = tds[4].get_text().strip()
+            tour["group"] = tds[5].get_text().strip()
+            # tds[6] = ? (übersprungen)
+            title_td = tds[7]
+            tour["title"] = title_td.get_text().strip()
 
-        link = title_td.find("a")
-        if link:
-            tour["url"] = link.get("href", "")
-        else:
-            tour["url"] = ""
+            link = title_td.find("a")
+            if link:
+                tour["url"] = link.get("href", "")
+            else:
+                tour["url"] = ""
 
-        # Tour-ID aus Query-String
-        parsed = urlparse(tour["url"])
-        qs = parse_qs(parsed.query)
-        tour["id"] = qs.get("touren_nummer", [None])[0]
+            # Tour-ID aus Query-String
+            parsed = urlparse(tour["url"])
+            qs = parse_qs(parsed.query)
+            tour["id"] = qs.get("touren_nummer", [None])[0]
 
-        tour["leiter"] = _extract_leiter_from_list_row(row)
+            tour["leiter"] = _extract_leiter_from_list_row(row)
 
-        num_tours_total += 1
-        detail_tours.append(tour)
+            num_tours_total += 1
+            detail_tours.append(tour)
 
-    # Detailseiten parallel abrufen (max. 2 gleichzeitig, wie im Original)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {
-            executor.submit(update_detail, db, t): t
-            for t in detail_tours
-        }
-        for future in as_completed(futures):
-            try:
-                success = future.result()
-                if not success:
+        # Detailseiten parallel abrufen (max. 2 gleichzeitig, wie im Original)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                executor.submit(update_detail, db, t): t
+                for t in detail_tours
+            }
+            for future in as_completed(futures):
+                try:
+                    success = future.result()
+                    if not success:
+                        t = futures[future]
+                        LOGGER.warning("Tour %s wurde nicht gespeichert.", t.get("id"))
+                except Exception:
                     t = futures[future]
-                    LOGGER.warning("Tour %s wurde nicht gespeichert.", t.get("id"))
-            except Exception:
-                t = futures[future]
-                LOGGER.exception("Fehler bei Tour %s", t.get("id"))
+                    LOGGER.exception("Fehler bei Tour %s", t.get("id"))
 
-    # Commit nach jeder Seite
-    db.commit()
+        # Commit nach jeder Seite
+        db.commit()
 
-    # Nächste Seite laden, wenn genug Ergebnisse
-    if len(detail_tours) > 40:
-        run(db, offset + 50)
-    else:
-        LOGGER.info("Commit und Datenbankverbindung schliessen.")
-        db.close()
+        # Nächste Seite laden, wenn genug Ergebnisse
+        if len(detail_tours) <= 40:
+            LOGGER.info("Commit abgeschlossen.")
+            break
+        current_offset += 50
 
 
-# ---------------------------------------------------------------------------
-# Einstiegspunkt
-# ---------------------------------------------------------------------------
+def run_historical(db: sqlite3.Connection) -> None:
+    """Scraped alle angebotenen Jahresarchive und danach die aktuelle Liste."""
+    years = discover_years()
+    for year in years:
+        LOGGER.info("Starte historischen Lauf für Jahr %s", year)
+        run(db, year=year, active=0, allow_empty=True)
 
-if __name__ == "__main__":
-    args = parse_args(sys.argv[1:])
+    LOGGER.info("Historischer Lauf abgeschlossen, aktualisiere aktive Liste.")
+    run(db, active=1)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
     LOGGER.debug("Logging konfiguriert mit Level %s", args.log_level)
     start_time = time.monotonic()
 
@@ -506,10 +576,24 @@ if __name__ == "__main__":
         if args.tour_url:
             # Einzelne Tour-URL direkt verarbeiten (wie im Original)
             ok = update_detail(None, {"url": args.tour_url})
-            if not ok:
-                sys.exit(1)
-        else:
-            database = init_database()
-            run(database)
+            return 0 if ok else 1
+
+        database = init_database()
+        try:
+            if args.historical:
+                run_historical(database)
+            else:
+                run(database)
+        finally:
+            database.close()
+        return 0
     finally:
         LOGGER.debug("Gesamtlaufzeit: %.3f Sekunden", time.monotonic() - start_time)
+
+
+# ---------------------------------------------------------------------------
+# Einstiegspunkt
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

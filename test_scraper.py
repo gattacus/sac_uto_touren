@@ -2,7 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import scraper
 
@@ -52,6 +52,34 @@ def _detail_page_with_leaders(rows: list[tuple[str, str]], leader_names: list[st
     """
 
 
+def _tour_record(tour_id: int = 12345, title: str = "Fixture Tour", active: int = 1) -> dict:
+    return {
+        "id": tour_id,
+        "active": active,
+        "lastSeen": 123,
+        "date_from": "2026-04-01",
+        "date_to": "2026-04-02",
+        "duration": "2 Tage",
+        "status": "open",
+        "type": "Wa",
+        "level": "T2",
+        "group": "Senior/innen",
+        "title": title,
+        "leiter": "Max Muster",
+        "url": "https://example.invalid/detail",
+        "altitude": "",
+        "mtype": "Tour",
+        "type_ext": "",
+        "level2": "",
+        "arrival": "",
+        "text": "",
+        "extra_info": "",
+        "equipment": "",
+        "subscription_period_start": None,
+        "subscription_period_end": None,
+    }
+
+
 class TestDatabaseDurationMigration(unittest.TestCase):
 
     def test_init_database_adds_duration_column_for_existing_db(self):
@@ -99,31 +127,7 @@ class TestDatabaseDurationMigration(unittest.TestCase):
 
     def test_update_row_persists_duration_into_duration_column(self):
         db = scraper.init_database(":memory:")
-        tour = {
-            "id": 12345,
-            "active": 1,
-            "lastSeen": 123,
-            "date_from": "2026-04-01",
-            "date_to": "2026-04-02",
-            "duration": "2 Tage",
-            "status": "open",
-            "type": "Wa",
-            "level": "T2",
-            "group": "Senior/innen",
-            "title": "Fixture Tour",
-            "leiter": "Max Muster",
-            "url": "https://example.invalid/detail",
-            "altitude": "",
-            "mtype": "Tour",
-            "type_ext": "",
-            "level2": "",
-            "arrival": "",
-            "text": "",
-            "extra_info": "",
-            "equipment": "",
-            "subscription_period_start": None,
-            "subscription_period_end": None,
-        }
+        tour = _tour_record()
 
         try:
             scraper.update_row(db, tour)
@@ -135,6 +139,93 @@ class TestDatabaseDurationMigration(unittest.TestCase):
             db.close()
 
         self.assertEqual(("2 Tage",), row)
+
+    def test_update_row_replaces_existing_tour_by_id(self):
+        db = scraper.init_database(":memory:")
+        original = _tour_record(title="Original Title", active=0)
+        updated = _tour_record(title="Updated Title", active=1)
+
+        try:
+            scraper.update_row(db, original)
+            scraper.update_row(db, updated)
+            row = db.execute(
+                "SELECT COUNT(*), title, active FROM data WHERE id = ?",
+                (updated["id"],),
+            ).fetchone()
+        finally:
+            db.close()
+
+        self.assertEqual((1, "Updated Title", 1), row)
+
+
+class TestHistoricalScrapeHelpers(unittest.TestCase):
+
+    def test_parse_args_accepts_historical_flag(self):
+        args = scraper.parse_args(["--historical"])
+
+        self.assertTrue(args.historical)
+        self.assertIsNone(args.tour_url)
+
+    def test_build_list_url_supports_current_and_year_specific_lists(self):
+        current_url = scraper.build_list_url(offset=50)
+        year_url = scraper.build_list_url(year=2026, offset=100)
+
+        self.assertEqual(
+            "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/"
+            "?page=touren&year=&typ=&gruppe=&anlasstyp=&suchstring=&offset=50",
+            current_url,
+        )
+        self.assertEqual(
+            "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/"
+            "?page=touren&year=2026&typ=&gruppe=&anlasstyp=&suchstring=&offset=100",
+            year_url,
+        )
+
+    def test_extract_years_from_html_preserves_dropdown_order_and_skips_noise(self):
+        html = """
+        <html>
+          <body>
+            <select name="year">
+              <option value="">- Jahr -</option>
+              <option value="2029">2029</option>
+              <option value="2028">2028</option>
+              <option value="archive">Archiv</option>
+              <option value="2028">2028 duplicate</option>
+              <option value="2002">2002</option>
+            </select>
+          </body>
+        </html>
+        """
+
+        years = scraper.extract_years_from_html(html)
+
+        self.assertEqual([2029, 2028, 2002], years)
+
+    def test_run_historical_scrapes_years_inactive_then_current_active(self):
+        db = object()
+
+        with (
+            patch("scraper.discover_years", return_value=[2029, 2028]),
+            patch("scraper.run") as run,
+        ):
+            scraper.run_historical(db)
+
+        self.assertEqual(
+            [
+                call(db, year=2029, active=0, allow_empty=True),
+                call(db, year=2028, active=0, allow_empty=True),
+                call(db, active=1),
+            ],
+            run.call_args_list,
+        )
+
+    def test_run_can_skip_empty_historical_year(self):
+        db = Mock()
+
+        with patch("scraper.fetch_page", return_value="<html><body>No rows</body></html>"):
+            scraper.run(db, year=2029, active=0, allow_empty=True)
+
+        db.commit.assert_not_called()
 
 
 class TestUpdateDetailSubscriptionPeriod(unittest.TestCase):
