@@ -135,6 +135,26 @@ class TestDbBrowser(unittest.TestCase):
         self.assertEqual(0, offset)
         self.assertEqual([2], [row["id"] for row in rows])
 
+    def test_query_tours_filters_specific_columns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "data.sqlite"
+            _create_db(db_path)
+            columns = db_browser.table_columns(db_path)
+
+            total, filtered, offset, rows = db_browser.query_tours(
+                db_path,
+                columns,
+                "",
+                "date_from",
+                "asc",
+                column_filters={"title": "Alpha", "arrival": "Zürich"},
+            )
+
+        self.assertEqual(2, total)
+        self.assertEqual(1, filtered)
+        self.assertEqual(0, offset)
+        self.assertEqual([10], [row["id"] for row in rows])
+
     def test_query_tours_sorts_numeric_columns_numerically(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "data.sqlite"
@@ -223,13 +243,17 @@ class TestDbBrowser(unittest.TestCase):
                 offset=offset,
                 limit=db_browser.DEFAULT_LIMIT,
                 query="",
+                column_filters={"title": "Alpha"},
                 sort_column="date_from",
                 sort_direction="asc",
             ).decode("utf-8")
 
         self.assertIn('name="q"', page)
+        self.assertIn('name="filter_title"', page)
+        self.assertIn('value="Alpha"', page)
         self.assertIn("sort=id", page)
         self.assertIn("Alpha Tour", page)
+        self.assertIn('href="https://example.invalid/10"', page)
         self.assertIn("/browser/rows", page)
         self.assertIn('id="previous-page"', page)
         self.assertIn('id="next-page"', page)

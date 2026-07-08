@@ -112,6 +112,18 @@ def clamp_offset(offset: int, filtered_count: int, limit: int) -> int:
     return min(offset, last_page_offset)
 
 
+def parse_column_filters(
+    params: dict[str, list[str]],
+    columns: list[str],
+) -> dict[str, str]:
+    filters = {}
+    for column in columns:
+        value = params.get(f"filter_{column}", [""])[0].strip()
+        if value:
+            filters[column] = value
+    return filters
+
+
 def query_tours(
     db_path: Path,
     columns: list[str],
@@ -120,8 +132,9 @@ def query_tours(
     sort_direction: str,
     limit: int = DEFAULT_LIMIT,
     offset: int = 0,
+    column_filters: dict[str, str] | None = None,
 ) -> tuple[int, int, int, list[sqlite3.Row]]:
-    where = ""
+    where_clauses: list[str] = []
     params: list[Any] = []
     if query:
         like = f"%{query}%"
@@ -129,8 +142,16 @@ def query_tours(
             f"COALESCE(CAST({column} AS TEXT), '') LIKE ?"
             for column in columns
         ]
-        where = f"WHERE {' OR '.join(clauses)}"
-        params = [like] * len(columns)
+        where_clauses.append(f"({' OR '.join(clauses)})")
+        params.extend([like] * len(columns))
+
+    for column, value in (column_filters or {}).items():
+        if column not in columns:
+            continue
+        where_clauses.append(f"COALESCE(CAST({column} AS TEXT), '') LIKE ?")
+        params.append(f"%{value}%")
+
+    where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     order_expr = sort_column
     if sort_column in NUMERIC_COLUMNS:
@@ -153,23 +174,34 @@ def query_tours(
     return count, filtered_count, offset, rows
 
 
-def page_url(query: str, sort: str, direction: str) -> str:
+def page_url(
+    query: str,
+    column_filters: dict[str, str],
+    sort: str,
+    direction: str,
+) -> str:
     params = {
         "sort": sort,
         "dir": direction,
     }
     if query:
         params["q"] = query
+    for column, value in column_filters.items():
+        if value:
+            params[f"filter_{column}"] = value
     return f"/browser?{urlencode(params)}"
 
 
-def render_cell(column: str, value: Any) -> str:
+def render_cell(column: str, value: Any, row: sqlite3.Row | None = None) -> str:
     text = "" if value is None else str(value)
     escaped = html.escape(text)
     if column == "active":
         label = "active" if text == "1" else "old"
         class_name = "active-1" if text == "1" else "active-0"
         return f'<span class="badge {class_name}">{label}</span>'
+    if column == "title" and text and row is not None and "url" in row.keys() and row["url"]:
+        href = html.escape(str(row["url"]), quote=True)
+        return f'<a href="{href}" target="_blank" rel="noreferrer">{escaped}</a>'
     if column == "status" and text:
         status_class = "".join(char for char in text.lower() if char.isalnum() or char in "_-")
         return f'<span class="badge status-{status_class}">{escaped}</span>'
@@ -186,7 +218,7 @@ def render_rows(columns: list[str], rows: list[sqlite3.Row]) -> str:
     body_rows = []
     for row in rows:
         cells = [
-            f'<td data-column="{html.escape(column, quote=True)}">{render_cell(column, row[column])}</td>'
+            f'<td data-column="{html.escape(column, quote=True)}">{render_cell(column, row[column], row)}</td>'
             for column in columns
         ]
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
@@ -232,6 +264,7 @@ def render_page(
     offset: int,
     limit: int,
     query: str,
+    column_filters: dict[str, str],
     sort_column: str,
     sort_direction: str,
 ) -> bytes:
@@ -240,16 +273,31 @@ def render_page(
         for column in columns
     }
     header_cells = []
+    filter_cells = []
     for column in columns:
         indicator = ""
         if sort_column == column:
             indicator = "▲" if sort_direction == "asc" else "▼"
-        href = page_url(query, column, next_direction[column])
+        href = page_url(query, column_filters, column, next_direction[column])
         header_cells.append(
-            '<th><a href="{href}"><span>{label}</span><span class="sort">{indicator}</span></a></th>'.format(
+            '<th><a href="{href}" data-sort="{sort}" data-next-dir="{direction}">'
+            '<span>{label}</span><span class="sort">{indicator}</span></a></th>'.format(
                 href=html.escape(href, quote=True),
+                sort=html.escape(column, quote=True),
+                direction=html.escape(next_direction[column], quote=True),
                 label=html.escape(column),
                 indicator=indicator,
+            )
+        )
+        filter_value = html.escape(column_filters.get(column, ""), quote=True)
+        filter_label = html.escape(f"Filter {column}", quote=True)
+        filter_name = html.escape(f"filter_{column}", quote=True)
+        filter_cells.append(
+            '<th><input class="column-filter" form="controls" type="search" '
+            'name="{name}" value="{value}" aria-label="{label}" autocomplete="off"></th>'.format(
+                name=filter_name,
+                value=filter_value,
+                label=filter_label,
             )
         )
 
@@ -423,6 +471,27 @@ def render_page(
       font-variant-numeric: tabular-nums;
     }}
 
+    thead tr:first-child th {{
+      top: 0;
+      z-index: 3;
+    }}
+
+    thead tr:nth-child(2) th {{
+      top: 34px;
+      z-index: 3;
+      padding: 4px 6px;
+      background: #f8fafb;
+    }}
+
+    input.column-filter[type="search"] {{
+      width: 100%;
+      min-width: 92px;
+      height: 28px;
+      border-color: var(--line);
+      padding: 0 7px;
+      font-size: 12px;
+    }}
+
     tbody tr:nth-child(even) {{ background: #fafbfc; }}
     tbody tr:hover {{ background: #edf7f5; }}
 
@@ -505,7 +574,7 @@ def render_page(
       <h1>SAC Uto Tours</h1>
       <div class="meta">Read-only view of {html.escape(str(db_path))}</div>
     </div>
-    <form class="controls" method="get" action="/browser">
+    <form id="controls" class="controls" method="get" action="/browser">
       <input type="hidden" name="sort" value="{html.escape(sort_column, quote=True)}">
       <input type="hidden" name="dir" value="{html.escape(sort_direction, quote=True)}">
       <input type="hidden" name="offset" value="{offset}">
@@ -521,7 +590,10 @@ def render_page(
   <main>
     <div class="table-wrap">
       <table>
-        <thead><tr>{''.join(header_cells)}</tr></thead>
+        <thead>
+          <tr>{''.join(header_cells)}</tr>
+          <tr>{''.join(filter_cells)}</tr>
+        </thead>
         <tbody>{render_rows(columns, rows)}</tbody>
       </table>
     </div>
@@ -529,6 +601,8 @@ def render_page(
   <script>
     const form = document.querySelector("form");
     const input = document.querySelector("#filter");
+    const columnFilters = Array.from(document.querySelectorAll(".column-filter"));
+    const sortLinks = Array.from(document.querySelectorAll("thead a[data-sort]"));
     const count = document.querySelector("#count");
     const tbody = document.querySelector("tbody");
     const sortInput = form.querySelector('input[name="sort"]');
@@ -546,6 +620,20 @@ def render_page(
       filtered: {filtered_count},
       total: {total_count}
     }};
+
+    function collectParams() {{
+      const params = new URLSearchParams({{
+        q: input.value.trim(),
+        sort: sortInput.value,
+        dir: dirInput.value,
+        offset: offsetInput.value
+      }});
+      columnFilters.forEach(filter => {{
+        const value = filter.value.trim();
+        if (value) params.set(filter.name, value);
+      }});
+      return params;
+    }}
 
     function countText(offset, rendered, filtered, total) {{
       if (filtered === 0) return total ? `0 / ${{total}}` : "0";
@@ -573,15 +661,21 @@ def render_page(
       nextPage.disabled = pageState.offset + pageState.rendered >= pageState.filtered;
     }}
 
+    function updateSortIndicators() {{
+      sortLinks.forEach(link => {{
+        const column = link.dataset.sort;
+        const indicator = link.querySelector(".sort");
+        const selected = sortInput.value === column;
+        const nextDirection = selected && dirInput.value === "asc" ? "desc" : "asc";
+        link.dataset.nextDir = nextDirection;
+        if (indicator) indicator.textContent = selected ? (dirInput.value === "asc" ? "▲" : "▼") : "";
+      }});
+    }}
+
     async function loadRows() {{
       if (filterRequest) filterRequest.abort();
       filterRequest = new AbortController();
-      const params = new URLSearchParams({{
-        q: input.value.trim(),
-        sort: sortInput.value,
-        dir: dirInput.value,
-        offset: offsetInput.value
-      }});
+      const params = collectParams();
       const response = await fetch(`/browser/rows?${{params.toString()}}`, {{
         signal: filterRequest.signal,
         cache: "no-store"
@@ -595,9 +689,10 @@ def render_page(
         total: Number(response.headers.get("X-Total-Count") || 0)
       }};
       updatePaging();
+      updateSortIndicators();
     }}
 
-    input.addEventListener("input", () => {{
+    function scheduleFilterLoad() {{
       clearTimeout(filterTimer);
       filterTimer = setTimeout(() => {{
         offsetInput.value = "0";
@@ -605,7 +700,12 @@ def render_page(
           if (error.name !== "AbortError") console.error(error);
         }});
       }}, 180);
+    }}
+
+    input.addEventListener("input", () => {{
+      scheduleFilterLoad();
     }});
+    columnFilters.forEach(filter => filter.addEventListener("input", scheduleFilterLoad));
     form.addEventListener("submit", event => {{
       event.preventDefault();
       clearTimeout(filterTimer);
@@ -620,7 +720,15 @@ def render_page(
       offsetInput.value = String(pageState.offset + limit);
       loadRows().catch(error => console.error(error));
     }});
+    sortLinks.forEach(link => link.addEventListener("click", event => {{
+      event.preventDefault();
+      sortInput.value = link.dataset.sort || sortInput.value;
+      dirInput.value = link.dataset.nextDir || "asc";
+      offsetInput.value = "0";
+      loadRows().catch(error => console.error(error));
+    }}));
     updatePaging();
+    updateSortIndicators();
   </script>
 </body>
 </html>
@@ -708,6 +816,7 @@ class BrowserHandler(BaseHTTPRequestHandler):
                 params.get("sort", ["date_from"])[0],
                 params.get("dir", ["asc"])[0],
             )
+            column_filters = parse_column_filters(params, columns)
             total_count, filtered_count, offset, rows = query_tours(
                 self.server.db_path,
                 columns,
@@ -715,6 +824,7 @@ class BrowserHandler(BaseHTTPRequestHandler):
                 sort_column,
                 sort_direction,
                 offset=offset,
+                column_filters=column_filters,
             )
             body = render_page(
                 db_path=self.server.db_path,
@@ -725,6 +835,7 @@ class BrowserHandler(BaseHTTPRequestHandler):
                 offset=offset,
                 limit=DEFAULT_LIMIT,
                 query=query,
+                column_filters=column_filters,
                 sort_column=sort_column,
                 sort_direction=sort_direction,
             )
@@ -752,6 +863,7 @@ class BrowserHandler(BaseHTTPRequestHandler):
                 params.get("sort", ["date_from"])[0],
                 params.get("dir", ["asc"])[0],
             )
+            column_filters = parse_column_filters(params, columns)
             total_count, filtered_count, offset, rows = query_tours(
                 self.server.db_path,
                 columns,
@@ -759,6 +871,7 @@ class BrowserHandler(BaseHTTPRequestHandler):
                 sort_column,
                 sort_direction,
                 offset=offset,
+                column_filters=column_filters,
             )
             body = render_rows(columns, rows).encode("utf-8")
         except Exception as exc:
