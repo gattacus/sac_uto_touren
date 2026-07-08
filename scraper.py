@@ -89,6 +89,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "current listing. Historical-only rows remain inactive."
         ),
     )
+    parser.add_argument(
+        "--refresh-existing",
+        action="store_true",
+        help=(
+            "With --historical, re-fetch and overwrite tours that already "
+            "exist in SQLite. Without this flag, historical archive pages "
+            "skip existing tour IDs."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         args.log_level = configure_logging(args.log_level)
@@ -235,6 +244,17 @@ def update_row(db: sqlite3.Connection | None, tour: dict) -> None:
         """, tour)
 
 
+def tour_exists(db: sqlite3.Connection, tour_id: object) -> bool:
+    """Prüft, ob eine Tour-ID bereits in SQLite vorhanden ist."""
+    if tour_id is None:
+        return False
+    row = db.execute(
+        "SELECT 1 FROM data WHERE id = ? LIMIT 1",
+        (tour_id,),
+    ).fetchone()
+    return row is not None
+
+
 # ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
@@ -364,7 +384,7 @@ def update_detail(db: sqlite3.Connection | None, tour: dict, retry: int = 1) -> 
         return False
 
     num_tours_done += 1
-    LOGGER.info(
+    LOGGER.debug(
         "Verarbeite Tour %s, %s von %s %s",
         tour.get("id"),
         num_tours_done,
@@ -441,6 +461,7 @@ def run(
     offset: int = 0,
     active: int = 1,
     allow_empty: bool = False,
+    refresh_existing: bool = True,
 ) -> None:
     """
     Verarbeitet die paginierte Tourenliste und ruft für jeden Eintrag
@@ -449,9 +470,13 @@ def run(
     global num_tours_total
 
     current_offset = offset
+    run_label = f"Jahr {year}" if year is not None else "aktive Liste"
+    LOGGER.info("Starte Listenlauf für %s ab Offset %s.", run_label, offset)
+
     while True:
         list_url = build_list_url(year=year, offset=current_offset)
 
+        LOGGER.info("Lade Hauptliste für %s, Offset %s.", run_label, current_offset)
         body = fetch_page(list_url)
         if body is None:
             LOGGER.error("Konnte Hauptseite nicht laden: %s", list_url)
@@ -470,6 +495,8 @@ def run(
             sys.exit(1)
 
         detail_tours: list[dict] = []
+        list_tours_found = 0
+        skipped_existing = 0
 
         for row in rows:
             cells = row.find_all(True, recursive=False)
@@ -526,9 +553,23 @@ def run(
             tour["id"] = qs.get("touren_nummer", [None])[0]
 
             tour["leiter"] = _extract_leiter_from_list_row(row)
+            list_tours_found += 1
+
+            if not refresh_existing and tour_exists(db, tour["id"]):
+                skipped_existing += 1
+                continue
 
             num_tours_total += 1
             detail_tours.append(tour)
+
+        LOGGER.info(
+            "Hauptliste für %s, Offset %s: %s Touren gefunden, %s neu, %s übersprungen.",
+            run_label,
+            current_offset,
+            list_tours_found,
+            len(detail_tours),
+            skipped_existing,
+        )
 
         # Detailseiten parallel abrufen (max. 2 gleichzeitig, wie im Original)
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -536,7 +577,9 @@ def run(
                 executor.submit(update_detail, db, t): t
                 for t in detail_tours
             }
+            page_tours_done = 0
             for future in as_completed(futures):
+                page_tours_done += 1
                 try:
                     success = future.result()
                     if not success:
@@ -545,23 +588,54 @@ def run(
                 except Exception:
                     t = futures[future]
                     LOGGER.exception("Fehler bei Tour %s", t.get("id"))
+                finally:
+                    if page_tours_done % 10 == 0 or page_tours_done == len(detail_tours):
+                        LOGGER.info(
+                            "Detailfortschritt für %s, Offset %s: %s/%s abgeschlossen.",
+                            run_label,
+                            current_offset,
+                            page_tours_done,
+                            len(detail_tours),
+                        )
 
         # Commit nach jeder Seite
         db.commit()
+        LOGGER.info(
+            "Commit für %s, Offset %s abgeschlossen.",
+            run_label,
+            current_offset,
+        )
 
         # Nächste Seite laden, wenn genug Ergebnisse
-        if len(detail_tours) <= 40:
-            LOGGER.info("Commit abgeschlossen.")
+        if list_tours_found <= 40:
+            LOGGER.info("Listenlauf für %s abgeschlossen.", run_label)
             break
         current_offset += 50
 
 
-def run_historical(db: sqlite3.Connection) -> None:
+def run_historical(db: sqlite3.Connection, refresh_existing: bool = False) -> None:
     """Scraped alle angebotenen Jahresarchive und danach die aktuelle Liste."""
     years = discover_years()
-    for year in years:
-        LOGGER.info("Starte historischen Lauf für Jahr %s", year)
-        run(db, year=year, active=0, allow_empty=True)
+    for index, year in enumerate(years, start=1):
+        LOGGER.info(
+            "Starte historischen Lauf %s/%s für Jahr %s.",
+            index,
+            len(years),
+            year,
+        )
+        run(
+            db,
+            year=year,
+            active=0,
+            allow_empty=True,
+            refresh_existing=refresh_existing,
+        )
+        LOGGER.info(
+            "Historischer Lauf %s/%s für Jahr %s abgeschlossen.",
+            index,
+            len(years),
+            year,
+        )
 
     LOGGER.info("Historischer Lauf abgeschlossen, aktualisiere aktive Liste.")
     run(db, active=1)
@@ -581,7 +655,7 @@ def main(argv: list[str]) -> int:
         database = init_database()
         try:
             if args.historical:
-                run_historical(database)
+                run_historical(database, refresh_existing=args.refresh_existing)
             else:
                 run(database)
         finally:

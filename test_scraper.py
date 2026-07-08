@@ -80,6 +80,37 @@ def _tour_record(tour_id: int = 12345, title: str = "Fixture Tour", active: int 
     }
 
 
+def _list_page(tour_ids: list[int]) -> str:
+    rows = "\n".join(
+        f"""
+        <tr>
+          <td class="status_1">So 7. Jun. 2026</td>
+          <td>Wa</td>
+          <td></td>
+          <td>T2</td>
+          <td>1 Tag</td>
+          <td>Senior/innen</td>
+          <td></td>
+          <td>
+            <a href="https://example.invalid/detail?page=detail&touren_nummer={tour_id}">
+              Tour {tour_id}
+            </a>
+          </td>
+        </tr>
+        """
+        for tour_id in tour_ids
+    )
+    return f"""
+    <html>
+      <body>
+        <table class="table">
+          {rows}
+        </table>
+      </body>
+    </html>
+    """
+
+
 class TestDatabaseDurationMigration(unittest.TestCase):
 
     def test_init_database_adds_duration_column_for_existing_db(self):
@@ -164,7 +195,14 @@ class TestHistoricalScrapeHelpers(unittest.TestCase):
         args = scraper.parse_args(["--historical"])
 
         self.assertTrue(args.historical)
+        self.assertFalse(args.refresh_existing)
         self.assertIsNone(args.tour_url)
+
+    def test_parse_args_accepts_refresh_existing_flag(self):
+        args = scraper.parse_args(["--historical", "--refresh-existing"])
+
+        self.assertTrue(args.historical)
+        self.assertTrue(args.refresh_existing)
 
     def test_build_list_url_supports_current_and_year_specific_lists(self):
         current_url = scraper.build_list_url(offset=50)
@@ -212,8 +250,43 @@ class TestHistoricalScrapeHelpers(unittest.TestCase):
 
         self.assertEqual(
             [
-                call(db, year=2029, active=0, allow_empty=True),
-                call(db, year=2028, active=0, allow_empty=True),
+                call(
+                    db,
+                    year=2029,
+                    active=0,
+                    allow_empty=True,
+                    refresh_existing=False,
+                ),
+                call(
+                    db,
+                    year=2028,
+                    active=0,
+                    allow_empty=True,
+                    refresh_existing=False,
+                ),
+                call(db, active=1),
+            ],
+            run.call_args_list,
+        )
+
+    def test_run_historical_can_refresh_existing_archive_rows(self):
+        db = object()
+
+        with (
+            patch("scraper.discover_years", return_value=[2029]),
+            patch("scraper.run") as run,
+        ):
+            scraper.run_historical(db, refresh_existing=True)
+
+        self.assertEqual(
+            [
+                call(
+                    db,
+                    year=2029,
+                    active=0,
+                    allow_empty=True,
+                    refresh_existing=True,
+                ),
                 call(db, active=1),
             ],
             run.call_args_list,
@@ -226,6 +299,54 @@ class TestHistoricalScrapeHelpers(unittest.TestCase):
             scraper.run(db, year=2029, active=0, allow_empty=True)
 
         db.commit.assert_not_called()
+
+    def test_incremental_historical_run_skips_existing_tours_but_keeps_paging(self):
+        db = scraper.init_database(":memory:")
+        existing_ids = list(range(1, 51))
+
+        try:
+            for tour_id in existing_ids:
+                scraper.update_row(db, _tour_record(tour_id=tour_id))
+
+            with (
+                patch("scraper.fetch_page", side_effect=[_list_page(existing_ids), _list_page([51])]),
+                patch("scraper.update_detail", return_value=True) as update_detail,
+            ):
+                scraper.run(
+                    db,
+                    year=2026,
+                    active=0,
+                    allow_empty=True,
+                    refresh_existing=False,
+                )
+        finally:
+            db.close()
+
+        update_detail.assert_called_once()
+        self.assertEqual("51", update_detail.call_args.args[1]["id"])
+
+    def test_refresh_existing_historical_run_fetches_existing_tours(self):
+        db = scraper.init_database(":memory:")
+
+        try:
+            scraper.update_row(db, _tour_record(tour_id=12345))
+
+            with (
+                patch("scraper.fetch_page", return_value=_list_page([12345])),
+                patch("scraper.update_detail", return_value=True) as update_detail,
+            ):
+                scraper.run(
+                    db,
+                    year=2026,
+                    active=0,
+                    allow_empty=True,
+                    refresh_existing=True,
+                )
+        finally:
+            db.close()
+
+        update_detail.assert_called_once()
+        self.assertEqual("12345", update_detail.call_args.args[1]["id"])
 
 
 class TestUpdateDetailSubscriptionPeriod(unittest.TestCase):

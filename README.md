@@ -26,6 +26,7 @@ I migrated it now to python. Thanks to Claude AI.
 | File                    | Description                                                        |
 |-------------------------|--------------------------------------------------------------------|
 | `scraper.py`            | Main script – fetches tour list and detail pages, writes to SQLite |
+| `db_browser.py`         | Read-only web UI for browsing the SQLite database                  |
 | `sacdateparser.py`      | Helper functions for parsing German-language date strings          |
 | `test_sacdateparser.py` | Unit tests for the date parser                                     |
 | `test_scraper.py`       | Unit tests for scraper parsing, schema migration, and persistence  |
@@ -98,6 +99,14 @@ scrapes the normal current listing last. Rows found only in historical year
 pages are retained with `active=0`; only tours still present in the current
 listing are stored with `active=1`.
 
+By default, historical archive pages are incremental: if a tour ID already
+exists in SQLite, its detail page is skipped. To force the previous full refresh
+behavior and re-fetch existing historical rows, pass `--refresh-existing`:
+
+```bash
+python scraper.py --historical --refresh-existing
+```
+
 ---
 
 ## Tests
@@ -168,13 +177,29 @@ while a previous one is still active.
 docker compose exec sac-uto-scraper python scraper.py
 ```
 
-### Download the resulting SQLite file
+### Browse and download the resulting SQLite file
 
-The `sac-uto-scraper` container also runs a simple file server for the `/data`
-directory, so the SQLite file is available over HTTP from the same container.
+The `sac-uto-scraper` container exposes the `/data` directory over HTTP, so
+existing file-server access remains available. It also runs a small read-only
+database browser at `/browser`. The browser queries `/data/data.sqlite` directly
+on each request and supports column sorting, a quick text filter, and paging.
+Table pages are limited to 200 rows so large historical databases remain
+responsive.
 
 By default it binds to `0.0.0.0:8084`, so any device on your local network can
-fetch it from the homeserver IP:
+open the file listing from the homeserver IP:
+
+```text
+http://YOUR-HOMESERVER-IP:8084/
+```
+
+The database browser is available at:
+
+```text
+http://YOUR-HOMESERVER-IP:8084/browser
+```
+
+The SQLite file itself remains available for download:
 
 ```bash
 curl -fO http://YOUR-HOMESERVER-IP:8084/data.sqlite
@@ -189,6 +214,12 @@ SQLITE_DOWNLOAD_BIND="127.0.0.1:8084" docker compose up -d
 
 You can also skip HTTP entirely and copy the file straight from the host because
 it is persisted in `./data/data.sqlite`.
+
+To run the browser directly outside Docker:
+
+```bash
+python db_browser.py --db data/data.sqlite --data-dir data --host 127.0.0.1 --port 8085
+```
 
 ---
 
@@ -229,6 +260,3 @@ Results are written to `data.sqlite`, table `data`:
   known server-side race condition on the source website.
 - At most 2 detail pages are fetched concurrently to avoid hammering the server.
 - With `--log-level DEBUG`, the scraper also logs total runtime at the end of the run.
-- Currently, the default process is to download all pages, even unchanged. The plan is to implement
-  a pre-condition based on the overview list to avoid unnecessary reload of everything. For this, the
-  python migration was the preparation step.
