@@ -295,10 +295,39 @@ class TestHistoricalScrapeHelpers(unittest.TestCase):
     def test_run_can_skip_empty_historical_year(self):
         db = Mock()
 
-        with patch("scraper.fetch_page", return_value="<html><body>No rows</body></html>"):
+        with (
+            patch("scraper.fetch_page", return_value="<html><body>No rows</body></html>") as fetch_page,
+            patch("scraper.time.sleep") as sleep,
+        ):
             scraper.run(db, year=2029, active=0, allow_empty=True)
 
+        fetch_page.assert_called_once()
+        sleep.assert_not_called()
         db.commit.assert_not_called()
+
+    def test_run_retries_empty_active_index_before_processing_rows(self):
+        db = Mock()
+
+        with (
+            patch(
+                "scraper.fetch_page",
+                side_effect=[
+                    "<html><body>No rows yet</body></html>",
+                    "<html><body>No rows still</body></html>",
+                    _list_page([12345]),
+                ],
+            ) as fetch_page,
+            patch("scraper.time.sleep") as sleep,
+            patch("scraper.update_detail", return_value=True) as update_detail,
+            patch("scraper.EMPTY_INDEX_RETRIES", 3),
+            patch("scraper.EMPTY_INDEX_RETRY_DELAY_SECONDS", 10),
+        ):
+            scraper.run(db)
+
+        self.assertEqual(3, fetch_page.call_count)
+        self.assertEqual([call(10), call(20)], sleep.call_args_list)
+        update_detail.assert_called_once()
+        db.commit.assert_called_once()
 
     def test_incremental_historical_run_skips_existing_tours_but_keeps_paging(self):
         db = scraper.init_database(":memory:")

@@ -43,6 +43,10 @@ LOGGER = logging.getLogger("sac_uto_touren")
 DB_WRITE_LOCK = threading.Lock()
 LEITER_SEPARATOR = " | "
 LIST_BASE_URL = "https://sac-uto.ch/de/aktivitaeten/touren-und-kurse/"
+EMPTY_INDEX_RETRIES = int(os.environ.get("SCRAPER_EMPTY_INDEX_RETRIES", "3"))
+EMPTY_INDEX_RETRY_DELAY_SECONDS = float(
+    os.environ.get("SCRAPER_EMPTY_INDEX_RETRY_DELAY_SECONDS", "10")
+)
 
 
 def configure_logging(level_name: str) -> str:
@@ -280,6 +284,47 @@ def fetch_page(url: str, retries: int = 3) -> str | None:
     return None
 
 
+def fetch_list_rows_with_empty_retry(
+    list_url: str,
+    run_label: str,
+    current_offset: int,
+    allow_empty: bool,
+) -> list:
+    """Lädt die Listenansicht und wiederholt leere aktive Startseiten kurz."""
+    max_empty_attempts = 1
+    if current_offset == 0 and not allow_empty:
+        max_empty_attempts += max(0, EMPTY_INDEX_RETRIES)
+
+    for attempt in range(1, max_empty_attempts + 1):
+        body = fetch_page(list_url)
+        if body is None:
+            LOGGER.error("Konnte Hauptseite nicht laden: %s", list_url)
+            sys.exit(1)
+
+        LOGGER.info("Verarbeite Hauptliste %s", list_url)
+        soup = BeautifulSoup(body, "html.parser")
+        rows = soup.select("table.table tr")
+
+        if rows or current_offset != 0 or allow_empty:
+            return rows
+
+        if attempt < max_empty_attempts:
+            delay_seconds = EMPTY_INDEX_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+            LOGGER.warning(
+                "Keine Daten auf der Indexseite gefunden für %s, Offset %s "
+                "(Versuch %s/%s). Wiederhole in %.1f Sekunden.",
+                run_label,
+                current_offset,
+                attempt,
+                max_empty_attempts,
+                delay_seconds,
+            )
+            time.sleep(delay_seconds)
+
+    LOGGER.error("Keine Daten auf der Indexseite gefunden.")
+    sys.exit(1)
+
+
 def build_list_url(year: int | str | None = None, offset: int = 0) -> str:
     """Baut die URL für die paginierte Tourenliste."""
     year_value = "" if year is None else str(year)
@@ -477,15 +522,12 @@ def run(
         list_url = build_list_url(year=year, offset=current_offset)
 
         LOGGER.info("Lade Hauptliste für %s, Offset %s.", run_label, current_offset)
-        body = fetch_page(list_url)
-        if body is None:
-            LOGGER.error("Konnte Hauptseite nicht laden: %s", list_url)
-            sys.exit(1)
-
-        LOGGER.info("Verarbeite Hauptliste %s", list_url)
-        soup = BeautifulSoup(body, "html.parser")
-
-        rows = soup.select("table.table tr")
+        rows = fetch_list_rows_with_empty_retry(
+            list_url,
+            run_label,
+            current_offset,
+            allow_empty,
+        )
 
         if current_offset == 0 and not rows:
             if allow_empty:
