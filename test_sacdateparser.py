@@ -12,6 +12,27 @@ import unittest
 from sacdateparser import parse_date2, parse_date3
 
 
+class TestParseDate2(unittest.TestCase):
+
+    def test_single_day(self):
+        self.assertEqual(
+            parse_date2('Mi 15. Aug. 2018 1 Tag'),
+            {'from': '2018-08-15', 'to': '2018-08-15'},
+        )
+
+    def test_range_same_year(self):
+        self.assertEqual(
+            parse_date2('Fr 30. Mär.  bis Mo 2. Apr. 2018'),
+            {'from': '2018-03-30', 'to': '2018-04-02'},
+        )
+
+    def test_range_crosses_year_boundary(self):
+        self.assertEqual(
+            parse_date2('Di 30. Dez.  bis Fr 2. Jan. 2026'),
+            {'from': '2025-12-30', 'to': '2026-01-02'},
+        )
+
+
 class TestParseDate3(unittest.TestCase):
 
     def test_complete(self):

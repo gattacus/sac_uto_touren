@@ -40,6 +40,13 @@ def _parse_date2_int(d: str, m: str, y: str, original: str) -> str:
     return f"{y_int}-{n_month:02d}-{d_int:02d}"
 
 
+def _parse_date2_range_start_year(start_month: int, end_month: int, end_year: int) -> int:
+    """Infers the start year for ranges that only print the end year."""
+    if start_month > end_month:
+        return end_year - 1
+    return end_year
+
+
 def parse_date2(s: str) -> dict:
     """
     Parst Datumsstrings der Form:
@@ -57,8 +64,12 @@ def parse_date2(s: str) -> dict:
     # z. B. "Fr 30. Mär.  bis Mo 2. Apr. 2018"
     # nach Bereinigung: ['Fr', '30', 'Mär', 'bis', 'Mo', '2', 'Apr', '2018']
     if block[3] == 'bis':
+        end_year = int(block[7])
+        start_month = parse_month(block[2])
+        end_month = parse_month(block[6])
+        start_year = _parse_date2_range_start_year(start_month, end_month, end_year)
         return {
-            'from': _parse_date2_int(block[1], block[2], block[7], s),
+            'from': _parse_date2_int(block[1], block[2], str(start_year), s),
             'to':   _parse_date2_int(block[5], block[6], block[7], s),
         }
     else:
